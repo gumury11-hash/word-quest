@@ -258,7 +258,7 @@
 
         // Gemini API Request with Exponential Backoff
         async function callGemini(systemPrompt, userPrompt, retries = 3, delay = 1000) {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
             const payload = {
                 contents: [{ parts: [{ text: userPrompt }] }],
                 systemInstruction: { parts: [{ text: systemPrompt }] }
