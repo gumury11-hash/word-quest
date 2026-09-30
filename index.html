@@ -136,6 +136,8 @@
     <script>
         // Game State Variables
         const SHARED_API_KEY_STORAGE = 'gemini_api_key';
+        const USED_WORDS_STORAGE = 'word_quest_used_words';
+        const WORD_POOL_STORAGE = 'word_quest_word_pool';
         let apiKey = localStorage.getItem(SHARED_API_KEY_STORAGE) || '';
         let secretWord = '';
         let questionCount = 0;
@@ -143,6 +145,81 @@
         let pendingQuestion = '';
         let questionRequestInProgress = false;
         let stats = JSON.parse(localStorage.getItem('game_stats')) || { wins: 0, totalQuestions: 0 };
+
+        function loadUsedWords() {
+            try {
+                const savedWords = JSON.parse(localStorage.getItem(USED_WORDS_STORAGE) || '[]');
+                return Array.isArray(savedWords) ? savedWords : [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function normalizeWord(word) {
+            return word.toLocaleLowerCase('ko-KR').replace(/\s+/g, '');
+        }
+
+        function cleanWord(word) {
+            return String(word).replace(/[^가-힣a-zA-Z]/g, '').trim();
+        }
+
+        function loadWordPool() {
+            try {
+                const savedWords = JSON.parse(localStorage.getItem(WORD_POOL_STORAGE) || '[]');
+                return Array.isArray(savedWords) ? savedWords.map(cleanWord).filter(Boolean) : [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function parseWordBatch(response) {
+            const text = response.replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+            try {
+                const parsed = JSON.parse(text);
+                if (Array.isArray(parsed)) return parsed.map(cleanWord).filter(Boolean);
+                if (Array.isArray(parsed.words)) return parsed.words.map(cleanWord).filter(Boolean);
+            } catch (error) {
+                // Fall back to one word per line if the model did not return valid JSON.
+            }
+            return text.split(/[\n,、]+/).map(word => cleanWord(word.replace(/^[-*\d.\s]+/, ''))).filter(Boolean);
+        }
+
+        function uniqueUnusedWords(words, usedWords, existingWords = []) {
+            const excluded = new Set([...usedWords, ...existingWords].map(normalizeWord));
+            return words.filter((word) => {
+                const normalized = normalizeWord(word);
+                if (!normalized || excluded.has(normalized)) return false;
+                excluded.add(normalized);
+                return true;
+            });
+        }
+
+        async function drawNextSecretWord() {
+            const usedWords = loadUsedWords();
+            let wordPool = uniqueUnusedWords(loadWordPool(), usedWords);
+
+            if (wordPool.length === 0) {
+                const systemPrompt = '당신은 단어 추리 게임의 출제자입니다. 일상에서 익숙한 명사 단어를 서로 중복되지 않게 정확히 10개 고르세요. 사용된 단어 목록에 있는 단어는 절대로 포함하지 마세요. 결과는 JSON 문자열 배열로만 답하세요. 예: ["사과", "기차"]';
+                const generatedWords = [];
+
+                for (let attempt = 0; attempt < 3 && generatedWords.length < 10; attempt++) {
+                    const excludedWords = [...usedWords, ...generatedWords];
+                    const prompt = `게임에 사용할 새 단어 10개를 JSON 배열로 출력하세요. 각 항목은 한 단어여야 합니다. 이미 출제했거나 후보로 받은 단어는 포함하지 마세요.\n이미 사용한 단어: ${JSON.stringify(excludedWords)}`;
+                    const response = await callGemini(systemPrompt, prompt);
+                    generatedWords.push(...uniqueUnusedWords(parseWordBatch(response), usedWords, generatedWords));
+                }
+                wordPool = generatedWords;
+            }
+
+            if (wordPool.length === 0) throw new Error('Could not generate unused words.');
+
+            const selectedIndex = Math.floor(Math.random() * wordPool.length);
+            const [selectedWord] = wordPool.splice(selectedIndex, 1);
+            usedWords.push(selectedWord);
+            localStorage.setItem(USED_WORDS_STORAGE, JSON.stringify(usedWords));
+            localStorage.setItem(WORD_POOL_STORAGE, JSON.stringify(wordPool));
+            return selectedWord;
+        }
 
         // DOM Elements
         const settingsPanel = document.getElementById('settings-panel');
@@ -258,7 +335,7 @@
 
         // Gemini API Request with Exponential Backoff
         async function callGemini(systemPrompt, userPrompt, retries = 3, delay = 1000) {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
             const payload = {
                 contents: [{ parts: [{ text: userPrompt }] }],
                 systemInstruction: { parts: [{ text: systemPrompt }] }
@@ -300,15 +377,7 @@
             questionCountBadge.textContent = '질문 횟수: 0회';
 
             try {
-                const systemPrompt = "당신은 단어 추리 게임의 사회자입니다. 치매 예방과 두뇌 자극에 좋은 친숙하고 일상적인 명사 단어(과일, 동물, 사물, 음식, 자연 등)를 딱 1개 비밀리에 선정하세요. 사용자에게 절대 단어를 말하지 말고, '단어를 선정했습니다. 질문을 시작해주세요!'라고만 답하세요.";
-                const response = await callGemini(systemPrompt, "새로운 게임을 시작합니다. 단어를 선정해주세요.");
-                
-                // Extract or generate secret word securely using another fast prompt or parsing
-                const wordPrompt = "방금 선정한 비밀 단어 한 단어만 정확히 출력하세요. (예: 사과, 코끼리, 연필 등 다른 설명 없이 단어만 출력)";
-                secretWord = await callGemini("당신은 단어 관리자입니다.", "비밀 단어를 정해주세요. 단어 이름 하나만 정확히 출력하세요.");
-                
-                // Clean up secret word
-                secretWord = secretWord.replace(/[^가-힣a-zA-Z]/g, '').trim();
+                secretWord = await drawNextSecretWord();
                 console.log("Secret Word (Debug):", secretWord);
 
                 gameActive = true;
